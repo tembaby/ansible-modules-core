@@ -34,9 +34,12 @@ extends_documentation_fragment:
     - files
     - validate
 short_description: Ensure a particular line is in a file, or replace an
-                   existing line using a back-referenced regular expression.
+                   existing line using a back-referenced regular expression. Will
+		   also check the existance of a line in a file without modifying
+		   the file.
 description:
   - This module will search a file for a line, and ensure that it is present or absent.
+  - With state=check mode, it will match the line against the file.
   - This is primarily useful when you want to change a single line in
     a file only. See the M(replace) module if you want to change
     multiple, similar lines; for other cases, see the M(copy) or
@@ -59,11 +62,12 @@ options:
         U(http://docs.python.org/2/library/re.html).
   state:
     required: false
-    choices: [ present, absent ]
+    choices: [ present, absent, check ]
     default: "present"
     aliases: []
     description:
-      - Whether the line should be there or not.
+      - Whether the line should be there or not. Also check line existance in
+        file in the "check" mode.
   line:
     required: false
     description:
@@ -128,6 +132,8 @@ EXAMPLES = r"""
 - lineinfile: dest=/etc/selinux/config regexp=^SELINUX= line=SELINUX=enforcing
 
 - lineinfile: dest=/etc/sudoers state=absent regexp="^%wheel"
+
+- lineinfile: dest=/home/te/.ssh/known_hosts state=check regexp="^127\.0\.0\.*"
 
 - lineinfile: dest=/etc/hosts regexp='^127\.0\.0\.1' line='127.0.0.1 localhost' owner=root group=root mode=0644
 
@@ -321,12 +327,46 @@ def absent(module, dest, regexp, line, backup):
     msg, changed = check_file_attrs(module, changed, msg)
     module.exit_json(changed=changed, found=len(found), msg=msg, backup=backupdest)
 
+# Check if line exists in file.  Line can be in the form of "line" or regular 
+# expression (regexp),  2015-12-12 - Tamer Embaby
+def check(module, dest, regexp, line):
+
+    if not os.path.exists(dest):
+        module.exit_json(changed=False, msg="file not present")
+	
+    msg = ""
+
+    f = open(dest, 'rb')
+    lines = f.readlines()
+    f.close()
+
+    if regexp is not None:
+        cre = re.compile(regexp)
+
+    found = []
+	
+    def matcher(cur_line):
+        if regexp is not None:
+            match_found = cre.search(cur_line)
+        else:
+            match_found = line == cur_line.rstrip('\r\n')
+        if match_found:
+            found.append(cur_line)
+        return not match_found
+	
+    lines = filter(matcher, lines)
+    changed = len(found) > 0
+
+    if changed:
+        msg = "%s line(s) matched" % len(found)
+	
+    module.exit_json(changed=changed, found=len(found), msg=msg, rc=not changed)
 
 def main():
     module = AnsibleModule(
         argument_spec=dict(
             dest=dict(required=True, aliases=['name', 'destfile']),
-            state=dict(default='present', choices=['absent', 'present']),
+            state=dict(default='present', choices=['absent', 'present', "check"]),
             regexp=dict(default=None),
             line=dict(aliases=['value']),
             insertafter=dict(default=None),
@@ -368,11 +408,16 @@ def main():
 
         present(module, dest, params['regexp'], line,
                 ins_aft, ins_bef, create, backup, backrefs)
-    else:
+    elif params['state'] == 'absent':
         if params['regexp'] is None and params.get('line', None) is None:
             module.fail_json(msg='one of line= or regexp= is required with state=absent')
 
         absent(module, dest, params['regexp'], params.get('line', None), backup)
+    else:
+        if params['regexp'] is None and params.get('line', None) is None:
+	    module.fail_json(msg='one of line= or regexp= is required with state=check')
+
+        check(module, dest, params['regexp'], params.get('line', None))
 
 # import module snippets
 from ansible.module_utils.basic import *
